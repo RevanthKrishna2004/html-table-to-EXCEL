@@ -111,6 +111,12 @@ Health check endpoint.
 }
 ```
 
+Sending a request and recieving a response in Postman:
+![Request](images/request.png)
+
+Excel table:
+![Excel](images/excel.png)
+
 ## Project Structure
 ```
 html-to-excel/
