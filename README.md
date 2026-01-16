@@ -29,6 +29,10 @@ A FastAPI-based web service that converts HTML tables into formatted Excel sprea
   - Preserved text indentation for hierarchical data
   - Hidden gridlines for cleaner appearance
 
+
+![Block Diagram](images/block_diagram.png)
+
+
 ## Installation
 
 ### Prerequisites
