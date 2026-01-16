@@ -72,7 +72,7 @@ The server will run at `http://[your local host]:8000`
 
 ### API Endpoints
 
-#### POST `/convert-table-to-excel`
+#### GET `/convert-table-to-excel`
 
 Convert an HTML table to an Excel file.
 
