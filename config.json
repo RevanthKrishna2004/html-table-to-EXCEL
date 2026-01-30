@@ -1,0 +1,14 @@
+{
+  "sources": [
+    {
+      "name": "population",
+      "url": "https://en.wikipedia.org/wiki/World_population",
+      "output_dir": "tables/population"
+    },
+    {
+      "name": "apple",
+      "url": "https://en.wikipedia.org/wiki/Apple_Inc.",
+      "output_dir": "tables/apple"
+    }
+  ]
+}

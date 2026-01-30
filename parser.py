@@ -5,10 +5,8 @@ Created on Wed Jan  7 16:57:18 2026
 @author: Krishna
 """
 from bs4 import BeautifulSoup
-import json
 import pandas as pd
-import openpyxl as pyxl
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl import load_workbook
 import re
 from openpyxl.utils import get_column_letter
@@ -45,12 +43,19 @@ def calculate_indent_level(left_padding, base_padding=10, indent_step=9):
     return indent_level
 
 def has_background_color(row):
-    """Check if any cell in the row has a background-color attribute"""
+    """Check if any cell in the row has a non-white background-color attribute"""
     cells = row.find_all('td')
     for cell in cells:
         style = cell.get('style', '')
         if 'background-color' in style:
-            return True
+            # Extract the background color value
+            import re
+            match = re.search(r'background-color:\s*([^;]+)', style)
+            if match:
+                color = match.group(1).strip().lower()
+                # Ignore white backgrounds
+                if color not in ['#ffffff', '#fff', 'white', 'rgb(255,255,255)', 'rgba(255,255,255,1)']:
+                    return True
     return False
 
 def parse_html(html_content):
@@ -165,6 +170,8 @@ def parse_html(html_content):
         else:
             cells = row.find_all('td')
         
+        current_html_pos = 0  # Position in the raw HTML columns
+        ind_to_col_span = {}
         # Check if this row should be center_continuous
         center_continuous = False
         if len(cells) == 1:
@@ -192,16 +199,41 @@ def parse_html(html_content):
                 if link_url.startswith('/'):
                     link_url = 'https://www.sec.gov' + link_url
             
+            # Determine which column groups this cell spans
+            cell_start_pos = current_html_pos
+            cell_end_pos = current_html_pos + colspan
+           
+            start_group = None
+            end_group = None
+           
+            for group_idx, (col_start, col_end) in enumerate(column_spans):
+                if col_start <= cell_start_pos < col_end:
+                    start_group = group_idx
+                if col_start < cell_end_pos <= col_end:
+                    end_group = group_idx
+                    break
+                elif cell_end_pos > col_end:
+                    end_group = group_idx
+            
+            if start_group is not None and end_group is not None:
+                num_groups = end_group - start_group + 1
+                if num_groups > 1:
+                    ind_to_col_span[start_group] = num_groups
+           
+           # Expand this cell to its full column positions
             expanded_cells.append(text)
             cell_links.append(link_url)
             
             for _ in range(colspan - 1):
                 expanded_cells.append('')
                 cell_links.append(None)
+           
+            current_html_pos += colspan
         
         # Group cells according to column_spans
         grouped_data = []
         grouped_links = []
+        #index in grouped data -> num cols in excel they span
         
         for start, end in column_spans:
             group_texts = [expanded_cells[j] for j in range(start, end) if j < len(expanded_cells)]
@@ -210,6 +242,7 @@ def parse_html(html_content):
             
             # Get the first non-None link in this group
             group_link = None
+            
             for j in range(start, end):
                 if j < len(cell_links) and cell_links[j]:
                     group_link = cell_links[j]
@@ -219,11 +252,11 @@ def parse_html(html_content):
         # Determine indent level from first cell's left padding
         left_padding = extract_left_padding(first_cell_style)
         indent_level = calculate_indent_level(left_padding)
-        
         table_data.append({
             "data": grouped_data,
             "links": grouped_links,  # Add links to the row data
             "indent_level": indent_level,
+            "ind_to_col_span": ind_to_col_span,
             "center_continuous": center_continuous,
             "left_padding": left_padding
         })
@@ -232,7 +265,8 @@ def parse_html(html_content):
     json_data = {
         "table": table_data,
         "column_count": len(column_spans),
-        "row_count": len(table_data)
+        "row_count": len(table_data),
+        "start_color": header_row_index+2
     }
     
     return json_data
@@ -268,14 +302,15 @@ def json_to_excel(json_data, output_file='output.xlsx', hyperlink_url=None, alte
         None: The function saves the Excel file to disk and doesn't return a value.
 
     """    
-
+    
+    # Prepare data for DataFrame
     rows_for_df = []
     numeric_cells = []
-    cell_hyperlinks = []  # Track hyperlinks for cells
+    cell_hyperlinks = []
     
     for row_idx, row_obj in enumerate(json_data['table']):
         data = row_obj['data'].copy()
-        links = row_obj.get('links', [None] * len(data))  # Get links or default to None
+        links = row_obj.get('links', [None] * len(data))
         indent = row_obj['indent_level']
         center_continuous = row_obj.get('center_continuous', False)
         
@@ -300,9 +335,17 @@ def json_to_excel(json_data, output_file='output.xlsx', hyperlink_url=None, alte
                 has_dollar = '$' in cell
                 has_percent = '%' in cell
                 has_comma = ',' in cell
+                is_negative_parens = False  # Track if number is in parentheses
                 
                 # Remove formatting for detection
                 cleaned = cell.replace(',', '').replace('$', '').replace('%', '').strip()
+                
+                # Check for parentheses format (negative numbers)
+                if cleaned.startswith('(') and cleaned.endswith(')'):
+                    is_negative_parens = True
+                    cleaned = cleaned[1:-1]  # Remove parentheses
+                    cleaned = '-' + cleaned  # Add negative sign
+                
                 cleaned = re.sub(r'\s+', '', cleaned)
                 
                 try:
@@ -314,6 +357,11 @@ def json_to_excel(json_data, output_file='output.xlsx', hyperlink_url=None, alte
                             decimal_places = len(cleaned.split('.')[1])
                         
                         num_value = float(cleaned) if '.' in cleaned else int(cleaned)
+                        
+                        # For percentages, divide by 100 since Excel multiplies by 100
+                        if has_percent:
+                            num_value = num_value / 100
+                        
                         processed_data.append(num_value)
                         # Track this cell needs number formatting
                         numeric_cells.append({
@@ -322,6 +370,7 @@ def json_to_excel(json_data, output_file='output.xlsx', hyperlink_url=None, alte
                             'has_dollar': has_dollar,
                             'has_percent': has_percent,
                             'has_comma': has_comma,
+                            'is_negative_parens': is_negative_parens,
                             'decimal_places': decimal_places
                         })
                     else:
@@ -365,6 +414,7 @@ def json_to_excel(json_data, output_file='output.xlsx', hyperlink_url=None, alte
         cell = ws.cell(row=cell_info['row'] + 1, column=cell_info['col'] + 1)
         decimal_places = cell_info['decimal_places']
         has_comma = cell_info['has_comma']
+        is_negative_parens = cell_info['is_negative_parens']
         
         # Build format string based on decimal places and comma presence
         if has_comma:
@@ -378,23 +428,45 @@ def json_to_excel(json_data, output_file='output.xlsx', hyperlink_url=None, alte
             else:
                 base_format = '0'
         
+        # Handle negative numbers in parentheses
+        if is_negative_parens:
+            # Format: positive;(negative)
+            if has_comma:
+                if decimal_places > 0:
+                    base_format = f'#,##0.{"0" * decimal_places};(#,##0.{"0" * decimal_places})'
+                else:
+                    base_format = '#,##0;(#,##0)'
+            else:
+                if decimal_places > 0:
+                    base_format = f'0.{"0" * decimal_places};(0.{"0" * decimal_places})'
+                else:
+                    base_format = '0;(0)'
+        
         if cell_info['has_dollar']:
-            cell.number_format = f'${base_format}'
+            if is_negative_parens:
+                # Format: $positive;($negative)
+                if has_comma:
+                    if decimal_places > 0:
+                        cell.number_format = f'$#,##0.{"0" * decimal_places};($#,##0.{"0" * decimal_places})'
+                    else:
+                        cell.number_format = '$#,##0;($#,##0)'
+                else:
+                    if decimal_places > 0:
+                        cell.number_format = f'$0.{"0" * decimal_places};($0.{"0" * decimal_places})'
+                    else:
+                        cell.number_format = '$0;($0)'
+            else:
+                cell.number_format = f'${base_format}'
         elif cell_info['has_percent']:
-            cell.number_format = f'{base_format}%'
+            # For percentages, decimal places in the format string
+            if decimal_places > 0:
+                cell.number_format = f'0.{"0" * decimal_places}%; (0.{"0" * decimal_places})%'
+            else:
+                cell.number_format = '0%; (0)%'
         else:
             cell.number_format = base_format
     
-    # Apply formatting based on row properties
-    for i, row_obj in enumerate(json_data['table'], start=1):
-        center_continuous = row_obj.get('center_continuous', False)
-        indent = row_obj['indent_level']
-        
-        if center_continuous:
-            for cell in ws[f'A{i}:{last_col_letter}{i}'][0]:
-                cell.alignment = Alignment(horizontal='centerContinuous', vertical='center')
-        elif indent > 0:
-            ws.cell(row=i, column=1).alignment = Alignment(indent=indent, vertical='center')
+    
     
     # Format header row (white with bold text)
     for cell in ws[1]:
@@ -412,8 +484,17 @@ def json_to_excel(json_data, output_file='output.xlsx', hyperlink_url=None, alte
     
     # Format data rows with alternating colors starting from row 2 (if enabled)
     if alternating_colors:
+        start_color_row = json_data.get('start_color', 2)
+        
         for row_idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), start=2):
-            fill = white_fill if row_idx % 2 == 0 else gray_fill
+            # Determine if this row should be gray or white
+            # The start_color_row should be gray, then alternate
+            offset = row_idx - start_color_row
+            if row_idx < start_color_row:
+                # Rows before start_color_row are white
+                fill = white_fill
+            else:
+                fill = gray_fill if offset % 2 == 0 else white_fill
             
             for cell in row:
                 cell.fill = fill
@@ -424,6 +505,26 @@ def json_to_excel(json_data, output_file='output.xlsx', hyperlink_url=None, alte
             for cell in row:
                 if not cell.alignment or (not cell.alignment.horizontal and not cell.alignment.indent):
                     cell.alignment = Alignment(vertical='center')
+    
+    # Apply formatting based on row properties
+    for i, row_obj in enumerate(json_data['table'], start=1):
+        center_continuous = row_obj.get('center_continuous', False)
+        indent = row_obj['indent_level']
+        ind_to_col_span = row_obj.get('ind_to_col_span', {})
+        
+        
+        if center_continuous:
+            for cell in ws[f'A{i}:{last_col_letter}{i}'][0]:
+                cell.alignment = Alignment(horizontal='centerContinuous', vertical='center')
+        elif indent > 0:
+            ws.cell(row=i, column=1).alignment = Alignment(indent=indent, vertical='center')
+        
+        for col_idx, num_groups in ind_to_col_span.items():
+            start_col_letter = get_column_letter(col_idx + 1)
+            end_col_letter = get_column_letter(col_idx + num_groups)
+            # Apply centerContinuous to all cells in the range
+            for cell in ws[f'{start_col_letter}{i}:{end_col_letter}{i}'][0]:
+                cell.alignment = Alignment(horizontal='centerContinuous', vertical='center')
     
     # Auto-adjust column widths
     for column in tuple(ws.columns):
@@ -438,7 +539,7 @@ def json_to_excel(json_data, output_file='output.xlsx', hyperlink_url=None, alte
             except:
                 pass
         
-        adjusted_width = min(max_length + 2, 50)
+        adjusted_width = min(max_length + 2, 70)
         ws.column_dimensions[column_letter].width = adjusted_width
     
     wb.save(output_file)
