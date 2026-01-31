@@ -124,14 +124,19 @@ def parse_html(html_content):
     header_row_index = None
     start_processing_index = None
     
-    if len(rows) > 3 and has_background_color(rows[3]):
-        header_row_index = 1
-        start_processing_index = 1
-    elif len(rows) > 4 and has_background_color(rows[4]):
-        header_row_index = 2
-        start_processing_index = 1
+    # Find the first row with gray background color
+    first_gray_row_index = None
+    for i, row in enumerate(rows):
+        if has_background_color(row):
+            first_gray_row_index = i
+            break
+    
+    if first_gray_row_index is not None:
+        # Go back 2 rows from the first gray row
+        header_row_index = max(0, first_gray_row_index - 2)
+        start_processing_index = max(1, header_row_index - 1)
     else:
-        # Search for first row with a non-empty value in the first column
+        # Fallback: Search for first row with a non-empty value in the first column
         header_row_index = None
         for i, row in enumerate(rows):
             cells = row.find_all('td')
